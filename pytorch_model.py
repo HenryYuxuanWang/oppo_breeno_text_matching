@@ -310,5 +310,5 @@ class Model:
         config = BertConfig(path)
         self.model = BertForMaskedLM(path, config, keep_tokens=self.keep_tokens)
         if self.checkpoint:
-            self.model.load_state_dict(torch.load(os.path.join(path, 'pytorch_model.bin'), map_location=device))
+            self.model.load_state_dict(torch.load(os.path.join(self.checkpoint, 'pytorch_model.bin'), map_location=device))
         self.model.to(device)
