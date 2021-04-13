@@ -256,6 +256,7 @@ class Model:
         print('total epochs : {}'.format(args.num_train_epochs))
         print('train_dataloader length : {}'.format(len(dataloader)))
         for epoch in range(int(args.num_train_epochs)):
+            print('Epoch: %d' % epoch)
             pbar = ProgressBar(n_total=len(dataloader), desc='Training')
             losses = []
             self.model.train()
@@ -279,7 +280,7 @@ class Model:
                     optimizer.step()
                     optimizer.zero_grad()
                     global_step += 1
-                pbar(step, {'epoch': epoch, 'step': step, 'loss': np.mean(losses)})
+                pbar(step, {'loss': np.mean(losses)})
             if 'cuda' in str(args.device):
                 torch.cuda.empty_cache()
             if eval_dataloader:
