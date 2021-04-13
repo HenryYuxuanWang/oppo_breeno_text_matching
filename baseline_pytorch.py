@@ -60,6 +60,9 @@ with open(dict_path, encoding='utf-8') as reader:
 freqs = [counts.get(i, 0) for i, j in sorted(token_dict.items(), key=lambda s: s[1])]  # bert vocab中每个token的词频
 keep_tokens = list(np.argsort(freqs)[::-1])  # 最高频token的index列表
 
+keep_tokens = [0, 100, 101, 102, 103, 100, 100] + keep_tokens[:len(tokens)]
+keep_tokens_dict = {i: num for i, num in enumerate(keep_tokens)}
+
 # 模拟未标注
 for d in valid_data + test_data:
     train_data.append((d[0], d[1], -5))
@@ -68,9 +71,11 @@ if __name__ == '__main__':
     from pytorch_model import Processor, Model
     from training_args import args
 
-    processor = Processor(tokens)
+    processor = Processor(tokens, keep_tokens_dict)
 
-    model = Model(path=os.path.join(cache_dir, pretrained_model))
     train_data = processor.get_examples(train_data, random=True)
     valid_data = processor.get_examples(valid_data)
-    model.train(train_data, valid_data, args=args)
+
+    model = Model()
+    model.train(train_data, valid_data, args=args, keep_tokens=keep_tokens)
+    # model.train(train_data, valid_data, args=args, checkpoint='/mnt/data/yuxuan/match/oppo_breeno/results')

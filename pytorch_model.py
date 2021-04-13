@@ -1,10 +1,15 @@
+import os
 import logging
 
 import torch
+from tqdm import tqdm
 import numpy as np
 from sklearn.metrics import roc_auc_score
-from transformers import BertForMaskedLM, AdamW, get_linear_schedule_with_warmup, set_seed, TrainingArguments
+from transformers import BertPreTrainedModel, BertModel, BertConfig, set_seed, TrainingArguments
+from transformers.models.bert.modeling_bert import BertOnlyMLMHead, MaskedLMOutput
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler, TensorDataset
+from torch.nn import CrossEntropyLoss
+from torch import nn
 
 from utils import InputFeatures
 from progress_bar import ProgressBar
@@ -122,12 +127,80 @@ class Processor:
         return features
 
 
+class BertForMaskedLM(BertPreTrainedModel):
+    def __init__(self, path, config, keep_tokens=None, embedding_dim=768):
+        super().__init__(config)
+        self.bert = BertModel.from_pretrained(path)
+        self.config = self.bert.config
+        if keep_tokens:
+            embedding_size = len(keep_tokens)
+            keep_word_embeddings = nn.Embedding(embedding_size, embedding_dim)
+            weight = self.bert.embeddings.word_embeddings(torch.tensor(keep_tokens, device=self.bert.device))
+            keep_word_embeddings.weight = nn.Parameter(weight)
+            self.bert.embeddings.word_embeddings = keep_word_embeddings
+            self.config.vocab_size = len(keep_tokens)
+        self.cls = BertOnlyMLMHead(self.config)
+
+    def forward(
+            self,
+            input_ids=None,
+            attention_mask=None,
+            token_type_ids=None,
+            position_ids=None,
+            head_mask=None,
+            inputs_embeds=None,
+            encoder_hidden_states=None,
+            encoder_attention_mask=None,
+            labels=None,
+            output_attentions=None,
+            output_hidden_states=None,
+            return_dict=None,
+    ):
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        outputs = self.bert(
+            input_ids,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+            position_ids=position_ids,
+            head_mask=head_mask,
+            inputs_embeds=inputs_embeds,
+            encoder_hidden_states=encoder_hidden_states,
+            encoder_attention_mask=encoder_attention_mask,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+
+        sequence_output = outputs[0]
+        prediction_scores = self.cls(sequence_output)
+
+        masked_lm_loss = None
+        if labels is not None:
+            loss_fct = CrossEntropyLoss()  # -100 index = padding token
+            masked_lm_loss = loss_fct(prediction_scores.view(-1, self.config.vocab_size), labels.view(-1))
+
+        if not return_dict:
+            output = (prediction_scores,) + outputs[2:]
+            return ((masked_lm_loss,) + output) if masked_lm_loss is not None else output
+
+        return MaskedLMOutput(
+            loss=masked_lm_loss,
+            logits=prediction_scores,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
+
+
 class Model:
-    def __init__(self, path):
+    def __init__(self, path='/mnt/data/yuxuan/pretrained_models/torch/bert/bert-base-chinese'):
         self.model_dir = path
         self.model = None
+        self.keep_tokens = None
+        self.checkpoint = False
 
-    def prepare_dataset(self, data):
+    @staticmethod
+    def prepare_dataset(data):
         all_input_ids = torch.tensor([f.input_ids for f in data], dtype=torch.long)
         all_attention_mask = torch.tensor([f.attention_mask for f in data], dtype=torch.long)
         all_token_type_ids = torch.tensor([f.token_type_ids for f in data], dtype=torch.long)
@@ -137,22 +210,22 @@ class Model:
         dataset = TensorDataset(*inputs)
         return dataset
 
-    def train(self, train_data, eval_data=None, args=None):
+    def train(self, train_data, eval_data=None, keep_tokens=None, args=None, checkpoint=False):
+        self.checkpoint = checkpoint
+        if keep_tokens:
+            self.keep_tokens = keep_tokens
         if args is None:
             output_dir = "tmp_trainer"
             logger.info(f"No `TrainingArguments` passed, using `output_dir={output_dir}`.")
             args = TrainingArguments(output_dir=output_dir)
         self.load(self.model_dir)
         early_stopping = EarlyStopping(verbose=True)
-        # args.n_gpu = torch.cuda.device_count()
-        # args.train_batch_size = args.per_device_train_batch_size * max(1, args.n_gpu)
         dataset = self.prepare_dataset(train_data)
         sampler = RandomSampler(dataset)
         dataloader = DataLoader(dataset, sampler=sampler, batch_size=args.train_batch_size, collate_fn=collate_fn)
         if eval_data:
             eval_dataset = self.prepare_dataset(eval_data)
             eval_sampler = SequentialSampler(eval_dataset)
-            # predict_batch_size = args.per_device_eval_batch_size * max(1, args.n_gpu)
             eval_dataloader = DataLoader(eval_dataset, sampler=eval_sampler, batch_size=args.eval_batch_size, collate_fn=collate_fn)
         else:
             eval_dataloader = None
@@ -162,15 +235,6 @@ class Model:
             args.num_train_epochs = args.max_steps // (len(dataloader) // args.gradient_accumulation_steps) + 1
         else:
             num_training_steps = len(dataloader) // args.gradient_accumulation_steps * args.num_train_epochs
-        args.warmup_steps = int(num_training_steps * args.warmup_ratio)
-        # Prepare optimizer and schedule (linear warmup and decay)
-        no_decay = ['bias', 'LayerNorm.weight']
-        optimizer_grouped_parameters = [
-            {'params': [p for n, p in self.model.named_parameters() if not any(nd in n for nd in no_decay)], 'weight_decay': args.weight_decay},
-            {'params': [p for n, p in self.model.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
-        ]
-        optimizer = AdamW(params=optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon)
-        scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=args.warmup_steps, num_training_steps=num_training_steps)
         # multi-gpu training
         if args.n_gpu > 1:
             self.model = torch.nn.DataParallel(self.model)
@@ -178,20 +242,22 @@ class Model:
         logger.info("***** Running training *****")
         logger.info("  Num examples = %d", len(dataset))
         logger.info("  Num Epochs = %d", args.num_train_epochs)
-        logger.info("  Instantaneous batch size per GPU = %d", args.per_gpu_train_batch_size)
+        logger.info("  Instantaneous batch size per GPU = %d", args.per_device_train_batch_size)
         logger.info("  Total train batch size (w. parallel, distributed & accumulation) = %d",
                     args.train_batch_size * args.gradient_accumulation_steps)
         logger.info("  Gradient Accumulation steps = %d", args.gradient_accumulation_steps)
         logger.info("  Total optimization steps = %d", num_training_steps)
 
         global_step = 0
-        tr_loss, logging_loss = 0.0, 0.0
+        # tr_loss = 0.0
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=args.learning_rate)
         self.model.zero_grad()
         set_seed(args.seed)  # Added here for reproductibility (even between python 2 and 3)
         print('total epochs : {}'.format(args.num_train_epochs))
         print('train_dataloader length : {}'.format(len(dataloader)))
-        for _ in range(int(args.num_train_epochs)):
+        for epoch in range(int(args.num_train_epochs)):
             pbar = ProgressBar(n_total=len(dataloader), desc='Training')
+            losses = []
             self.model.train()
             for step, batch in enumerate(dataloader):
                 batch = tuple(t.to(args.device) for t in batch)
@@ -204,19 +270,16 @@ class Model:
                 loss = outputs[0]
                 if args.n_gpu > 1:
                     loss = loss.mean()  # mean() to average on multi-gpu parallel training
+                losses.append(loss.cpu().detach().numpy())
                 if args.gradient_accumulation_steps > 1:
                     loss = loss / args.gradient_accumulation_steps
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), args.max_grad_norm)
-
-                tr_loss += loss.item()
+                # tr_loss += loss.item()
                 if (step + 1) % args.gradient_accumulation_steps == 0:
                     optimizer.step()
-                    scheduler.step()  # Update learning rate schedule
-                    self.model.zero_grad()
+                    optimizer.zero_grad()
                     global_step += 1
-                pbar(step, {'loss': loss.item()})
-            print(" ")
+                pbar(step, {'epoch': epoch, 'step': step, 'loss': np.mean(losses)})
             if 'cuda' in str(args.device):
                 torch.cuda.empty_cache()
             if eval_dataloader:
@@ -224,7 +287,7 @@ class Model:
                 early_stopping(score, self.model, args.output_dir)
 
     def evaluate(self, dataloader):
-        pbar = ProgressBar(n_total=len(dataloader), desc="Predicting")
+        pbar = ProgressBar(n_total=len(dataloader), desc='Evaluating')
         self.model.eval()
         Y_true, Y_pred = [], []
         for step, batch in enumerate(dataloader):
@@ -244,5 +307,8 @@ class Model:
         return roc_auc_score(Y_true, Y_pred)
 
     def load(self, path):
-        self.model = BertForMaskedLM.from_pretrained(path)
+        config = BertConfig(path)
+        self.model = BertForMaskedLM(path, config, keep_tokens=self.keep_tokens)
+        if self.checkpoint:
+            self.model.load_state_dict(torch.load(os.path.join(path, 'pytorch_model.bin'), map_location=device))
         self.model.to(device)
