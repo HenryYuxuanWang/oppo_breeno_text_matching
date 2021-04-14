@@ -124,7 +124,7 @@ class TaskDataset(Dataset):
 class BertForMaskedLM(BertPreTrainedModel):
     def __init__(self, path, config, keep_tokens=None, embedding_dim=768):
         super().__init__(config)
-        self.bert = BertModel.from_pretrained(path)
+        self.bert = BertModel.from_pretrained(path, add_pooling_layer=False)
         self.config = self.bert.config
         if keep_tokens:
             embedding_size = len(keep_tokens)
