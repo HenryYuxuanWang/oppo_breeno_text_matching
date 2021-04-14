@@ -187,7 +187,7 @@ class BertForMaskedLM(BertPreTrainedModel):
 
 
 class Model:
-    def __init__(self, path='/data/pretrained_models/torch/bert/bert-base-chinese'):
+    def __init__(self, path='./data/pretrained_models/torch/bert/bert-base-chinese'):
         self.model_dir = path
         self.model = None
         self.keep_tokens = None

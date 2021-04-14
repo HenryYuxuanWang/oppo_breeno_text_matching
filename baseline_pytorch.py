@@ -4,7 +4,7 @@ import json
 import numpy as np
 from utils import load_data, load_vocab
 
-cache_dir = '/data/pretrained_models/torch/bert'
+cache_dir = './data/pretrained_models/torch/bert'
 pretrained_model = 'bert-base-chinese'
 dict_path = os.path.join(cache_dir, *[pretrained_model, 'vocab.txt'])
 
@@ -13,10 +13,10 @@ max_len = 32
 batch_size = 128
 
 # 加载数据集
-data = load_data('/data/oppo_breeno/oppo_breeno_round1_data/gaiic_track3_round1_train_20210228.tsv', max_len=max_len)
+data = load_data('./data/oppo_breeno_round1_data/gaiic_track3_round1_train_20210228.tsv', max_len=max_len)
 train_data = [d for i, d in enumerate(data) if i % 10 != 0]
 valid_data = [d for i, d in enumerate(data) if i % 10 == 0]
-test_data = load_data('/data/oppo_breeno/oppo_breeno_round1_data/gaiic_track3_round1_testA_20210228.tsv', max_len=max_len)
+test_data = load_data('./data/oppo_breeno_round1_data/gaiic_track3_round1_testA_20210228.tsv', max_len=max_len)
 
 # 统计词频
 tokens = {}
@@ -48,5 +48,5 @@ if __name__ == '__main__':
     from training_args import args
 
     model = Model()
-    # model.train(train_data, tokens, keep_tokens, valid_data, args=args)
-    model.train(train_data, tokens, keep_tokens, valid_data, args=args, checkpoint='/data/oppo_breeno/results')
+    model.train(train_data, tokens, keep_tokens, valid_data, args=args)
+    # model.train(train_data, tokens, keep_tokens, valid_data, args=args, checkpoint='./data/results')
