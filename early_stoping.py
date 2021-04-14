@@ -1,5 +1,4 @@
 import numpy as np
-import torch
 
 
 class EarlyStopping:
@@ -36,6 +35,5 @@ class EarlyStopping:
         '''Saves model when validation loss decrease.'''
         if self.verbose:
             print(u'  val_score: %.5f, best_val_score: %.5f\n' % (val_score, self.best_score))
-        torch.save(model.state_dict(), 'checkpoint.pt')
         model_to_save = model.module if hasattr(model, 'module') else model
         model_to_save.save_pretrained(path)

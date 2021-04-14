@@ -1,50 +1,45 @@
-import copy
-import json
-
 import numpy as np
 
 
-def truncate_sequences(maxlen, index, *sequences):
-    """截断总长度至不超过maxlen
+def truncate_sequences(max_len, index, *sequences):
+    """截断总长度至不超过max_len
     """
     sequences = [s for s in sequences if s]
     while True:
         lengths = [len(s) for s in sequences]
-        if sum(lengths) > maxlen:
+        if sum(lengths) > max_len:
             i = np.argmax(lengths)
             sequences[i].pop(index)
         else:
             return sequences
 
 
-class InputFeatures(object):
+def load_data(filename, max_len):
+    """加载数据
+    单条格式：(文本1 ids, 文本2 ids, 标签id)
     """
-    A single set of features of data.
+    D = []
+    with open(filename) as f:
+        for l in f:
+            l = l.strip().split('\t')
+            if len(l) == 3:
+                a, b, c = l[0], l[1], int(l[2])
+            else:
+                a, b, c = l[0], l[1], -5  # 未标注数据，标签为-5
+            a = [int(i) for i in a.split(' ')]
+            b = [int(i) for i in b.split(' ')]
+            truncate_sequences(max_len, -1, a, b)
+            D.append((a, b, c))
+    return D
 
-    Args:
-        input_ids: Indices of input sequence tokens in the vocabulary.
-        attention_mask: Mask to avoid performing attention on padding token indices.
-            Mask values selected in ``[0, 1]``:
-            Usually  ``1`` for tokens that are NOT MASKED, ``0`` for MASKED (padded) tokens.
-        token_type_ids: Segment token indices to indicate first and second portions of the inputs.
-        label: Label corresponding to the input
+
+def load_vocab(dict_path, encoding='utf-8'):
+    """从bert的词典文件中读取词典
     """
-
-    def __init__(self, input_ids, attention_mask, token_type_ids, label, input_len):
-        self.input_ids = input_ids
-        self.attention_mask = attention_mask
-        self.token_type_ids = token_type_ids
-        self.input_len = input_len
-        self.label = label
-
-    def __repr__(self):
-        return str(self.to_json_string())
-
-    def to_dict(self):
-        """Serializes this instance to a Python dictionary."""
-        output = copy.deepcopy(self.__dict__)
-        return output
-
-    def to_json_string(self):
-        """Serializes this instance to a JSON string."""
-        return json.dumps(self.to_dict(), indent=2, sort_keys=True) + "\n"
+    token_dict = {}
+    with open(dict_path, encoding=encoding) as reader:
+        for line in reader:
+            token = line.split()
+            token = token[0] if token else line.strip()
+            token_dict[token] = len(token_dict)
+    return token_dict

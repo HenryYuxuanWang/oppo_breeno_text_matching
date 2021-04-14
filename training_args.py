@@ -1,7 +1,7 @@
 from transformers import TrainingArguments
 
 args = TrainingArguments(
-    output_dir='/data/oppo_breeno/results',
+    output_dir='/data/match/oppo_breeno/results',
     num_train_epochs=100,
     per_device_train_batch_size=128,
     per_device_eval_batch_size=64,

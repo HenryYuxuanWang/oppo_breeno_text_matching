@@ -2,16 +2,14 @@ import os
 import logging
 
 import torch
-from tqdm import tqdm
 import numpy as np
 from sklearn.metrics import roc_auc_score
-from transformers import BertPreTrainedModel, BertModel, BertConfig, set_seed, TrainingArguments
+from transformers import BertPreTrainedModel, BertModel, BertConfig, AdamW, set_seed, TrainingArguments
 from transformers.models.bert.modeling_bert import BertOnlyMLMHead, MaskedLMOutput
-from torch.utils.data import DataLoader, RandomSampler, SequentialSampler, TensorDataset
+from torch.utils.data import DataLoader, RandomSampler, SequentialSampler, Dataset, TensorDataset
 from torch.nn import CrossEntropyLoss
 from torch import nn
 
-from utils import InputFeatures
 from progress_bar import ProgressBar
 
 from early_stoping import EarlyStopping
@@ -34,9 +32,33 @@ def collate_fn(batch):
     return all_input_ids, all_attention_mask, all_token_type_ids, label
 
 
-class Processor:
-    def __init__(self, tokens):
+class TaskDataset(Dataset):
+    def __init__(self, data, tokens, random: bool = True, max_len: int = 128):
+        self.data = data
         self.tokens = tokens
+        self.max_len = max_len
+        self.random = random
+
+    def __getitem__(self, index):
+        text1, text2, label = self.data[index]
+        token_ids, segment_ids, output_ids = self.sample_convert(text1, text2, label, self.random)
+        attention_mask = [1] * len(token_ids)
+        input_len = len(token_ids)
+
+        token_ids = self.sequence_padding([token_ids], length=self.max_len)[0]
+        attention_mask = self.sequence_padding([attention_mask], length=self.max_len)[0]
+        segment_ids = self.sequence_padding([segment_ids], length=self.max_len)[0]
+        label = self.sequence_padding([output_ids], length=self.max_len)[0]
+
+        token_ids = torch.tensor(token_ids, dtype=torch.long)
+        attention_mask = torch.tensor(attention_mask, dtype=torch.long)
+        segment_ids = torch.tensor(segment_ids, dtype=torch.long)
+        input_len = torch.tensor(input_len, dtype=torch.long)
+        label = torch.tensor(label, dtype=torch.long)
+        return [token_ids, attention_mask, segment_ids, input_len, label]
+
+    def __len__(self):
+        return len(self.data)
 
     def random_mask(self, text_ids):
         """随机mask
@@ -97,34 +119,6 @@ class Processor:
             outputs.append(x)
 
         return np.array(outputs)
-
-    def get_examples(self, data, random=False):
-        all_token_ids, all_attention_mask, all_segment_ids, all_input_len, all_label = [], [], [], [], []
-        for i, line in enumerate(data):
-            text1, text2, label = line
-            token_ids, segment_ids, output_ids = self.sample_convert(text1, text2, label, random)
-            attention_mask = [1] * len(token_ids)
-            input_len = len(token_ids)
-            all_token_ids.append(token_ids)
-            all_attention_mask.append(attention_mask)
-            all_segment_ids.append(segment_ids)
-            all_input_len.append(input_len)
-            all_label.append(output_ids)
-        max_len = max(all_input_len)
-        all_token_ids = self.sequence_padding(all_token_ids, length=max_len)
-        all_attention_mask = self.sequence_padding(all_attention_mask, length=max_len)
-        all_segment_ids = self.sequence_padding(all_segment_ids, length=max_len)
-        all_label = self.sequence_padding(all_label, length=max_len)
-        features = [
-            InputFeatures(
-                input_ids=all_token_ids[j],
-                attention_mask=all_attention_mask[j],
-                token_type_ids=all_segment_ids[j],
-                label=all_label[j],
-                input_len=all_input_len[j]
-            ) for j in range(len(data))
-        ]
-        return features
 
 
 class BertForMaskedLM(BertPreTrainedModel):
@@ -193,11 +187,11 @@ class BertForMaskedLM(BertPreTrainedModel):
 
 
 class Model:
-    def __init__(self, path='/mnt/data/yuxuan/pretrained_models/torch/bert/bert-base-chinese'):
+    def __init__(self, path='/data/pretrained_models/torch/bert/bert-base-chinese'):
         self.model_dir = path
         self.model = None
         self.keep_tokens = None
-        self.checkpoint = False
+        self.checkpoint = None
 
     @staticmethod
     def prepare_dataset(data):
@@ -210,21 +204,22 @@ class Model:
         dataset = TensorDataset(*inputs)
         return dataset
 
-    def train(self, train_data, eval_data=None, keep_tokens=None, args=None, checkpoint=False):
+    def train(self, train_data, tokens, keep_tokens, eval_data=None, args=None, checkpoint=None):
         self.checkpoint = checkpoint
-        if keep_tokens:
-            self.keep_tokens = keep_tokens
+        self.keep_tokens = keep_tokens
         if args is None:
             output_dir = "tmp_trainer"
             logger.info(f"No `TrainingArguments` passed, using `output_dir={output_dir}`.")
             args = TrainingArguments(output_dir=output_dir)
         self.load(self.model_dir)
         early_stopping = EarlyStopping(verbose=True)
-        dataset = self.prepare_dataset(train_data)
+        max_len_train = max([len(x[0]) + len(x[1]) + 3 for x in train_data])
+        max_len_eval = max([len(x[0]) + len(x[1]) + 3 for x in eval_data])
+        dataset = TaskDataset(train_data, tokens, random=True, max_len=max_len_train)
         sampler = RandomSampler(dataset)
         dataloader = DataLoader(dataset, sampler=sampler, batch_size=args.train_batch_size, collate_fn=collate_fn)
         if eval_data:
-            eval_dataset = self.prepare_dataset(eval_data)
+            eval_dataset = TaskDataset(eval_data, tokens, random=False, max_len=max_len_eval)
             eval_sampler = SequentialSampler(eval_dataset)
             eval_dataloader = DataLoader(eval_dataset, sampler=eval_sampler, batch_size=args.eval_batch_size, collate_fn=collate_fn)
         else:
@@ -250,7 +245,7 @@ class Model:
 
         global_step = 0
         # tr_loss = 0.0
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=args.learning_rate)
+        optimizer = AdamW(self.model.parameters(), lr=args.learning_rate)
         self.model.zero_grad()
         set_seed(args.seed)  # Added here for reproductibility (even between python 2 and 3)
         print('total epochs : {}'.format(args.num_train_epochs))
